@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Bass Input Visualizer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta
+    name="description"
+    content="Browser-based bass visualizer for audio interfaces and pedals ."
+  />
+  <style>
+    body {
+      margin: 0;
+      padding: 16px;
+      background: #050814;
+      color: #f5f5f5;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+
+    h1 {
+      font-size: 20px;
+      margin: 0;
+      text-align: center;
+    }
+
+    #controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: 960px;
+    }
+
+    button {
+      padding: 8px 16px;
+      border-radius: 999px;
+      border: none;
+      cursor: pointer;
+      font-size: 14px;
+      background: #00d6a2;
+      color: #050814;
+      font-weight: 600;
+    }
+
+    button:disabled {
+      opacity: 0.4;
+      cursor: default;
+    }
+
+    canvas {
+      background: #11131f;
+      border-radius: 10px;
+      width: 95vw;
+      max-width: 960px;
+      box-shadow: 0 0 25px rgba(0, 0, 0, 0.6);
+      display: block;
+    }
+
+    #waveCanvas  { height: 180px; }
+    #barsCanvas  { height: 150px; }
+    #logCanvas   { height: 120px; }
+    #dwarfCanvas { height: 150px; }
+
+    small {
+      opacity: 0.7;
+      text-align: center;
+    }
+
+    /* hide scrollbars */
+    ::-webkit-scrollbar { display: none; }
+    * {
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>Bass Input Visualizer</h1>
+
+  <div id="controls">
+    <button id="startBtn">Select Audio Input</button>
+<small>Select your audio interface or USB input when prompted.</small>
+
+  </div>
+
+  <canvas id="waveCanvas"></canvas>
+  <canvas id="barsCanvas"></canvas>
+  <canvas id="logCanvas"></canvas>
+  <canvas id="dwarfCanvas"></canvas>
+
+  <script>
+    window.addEventListener("load", () => {
+      const startBtn     = document.getElementById("startBtn");
+      const waveCanvas   = document.getElementById("waveCanvas");
+      const barsCanvas   = document.getElementById("barsCanvas");
+      const logCanvas    = document.getElementById("logCanvas");
+      const dwarfCanvas  = document.getElementById("dwarfCanvas");
+
+      if (!waveCanvas || !barsCanvas || !logCanvas || !dwarfCanvas) {
+        console.error("Canvas elements not found");
+        return;
+      }
+
+      const waveCtx   = waveCanvas.getContext("2d");
+      const barsCtx   = barsCanvas.getContext("2d");
+      const logCtx    = logCanvas.getContext("2d");
+      const dwarfCtx  = dwarfCanvas.getContext("2d");
+
+      const dwarves = [
+        { name: "Tubby", min: 20,   max: 60  },
+        { name: "Muddy", min: 60,   max: 180 },
+        { name: "Boxy",  min: 180,  max: 400 },
+        { name: "Honky", min: 400,  max: 800 },
+        { name: "Barky", min: 800,  max: 1600 },
+        { name: "Edgy",  min: 1600, max: 4000 },
+        { name: "Fizzy", min: 4000, max: 8000 }
+      ];
+
+      let audioCtx = null;
+      let analyser = null;
+      let timeData = null;
+      let freqData = null;
+      let running  = false;
+
+      function resizeCanvases() {
+        const dpr = window.devicePixelRatio || 1;
+        [waveCanvas, barsCanvas, logCanvas, dwarfCanvas].forEach(c => {
+          const rect = c.getBoundingClientRect();
+          c.width  = rect.width * dpr;
+          c.height = rect.height * dpr;
+        });
+      }
+
+      window.addEventListener("resize", resizeCanvases);
+      resizeCanvases();
+
+      async function initAudio() {
+        if (running) return;
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          alert("getUserMedia is not supported in this browser. Try a recent Chrome, Edge, or Firefox over HTTPS.");
+          return;
+        }
+
+        running = true;
+        startBtn.disabled = true;
+        startBtn.textContent = "Listening…";
+
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false
+            }
+          });
+
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          if (!AudioContext) {
+            alert("Web Audio API not supported in this browser.");
+            resetButton();
+            return;
+          }
+
+          audioCtx = new AudioContext();
+
+          // Some browsers require explicit resume after a user gesture
+          if (audioCtx.state === "suspended") {
+            await audioCtx.resume();
+          }
+
+          const source = audioCtx.createMediaStreamSource(stream);
+
+          analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 2048;
+
+          const len = analyser.frequencyBinCount;
+          timeData = new Uint8Array(len);
+          freqData = new Uint8Array(len);
+
+          source.connect(analyser);
+          draw();
+        } catch (err) {
+          console.error(err);
+          alert("Error accessing audio input: " + (err.message || err));
+          resetButton();
+          running = false;
+        }
+      }
+
+      function resetButton() {
+        startBtn.disabled = false;
+        startBtn.textContent = "Select Interface";
+      }
+
+      function freqToLogX(freq, width) {
+        const minF = 20, maxF = 20000;
+        const logMin = Math.log10(minF);
+        const logMax = Math.log10(maxF);
+        const pos = (Math.log10(freq) - logMin) / (logMax - logMin);
+        return pos * width;
+      }
+
+      function draw() {
+        requestAnimationFrame(draw);
+        if (!analyser || !audioCtx || !timeData || !freqData) return;
+
+        const dpr = window.devicePixelRatio || 1;
+
+        analyser.getByteTimeDomainData(timeData);
+        analyser.getByteFrequencyData(freqData);
+
+        // --- waveform ---
+        const wW = waveCanvas.width;
+        const wH = waveCanvas.height;
+        waveCtx.clearRect(0, 0, wW, wH);
+
+        waveCtx.strokeStyle = "rgba(255,255,255,0.18)";
+        waveCtx.lineWidth = 1 * dpr;
+        waveCtx.beginPath();
+        waveCtx.moveTo(0, wH / 2);
+        waveCtx.lineTo(wW, wH / 2);
+        waveCtx.stroke();
+
+        waveCtx.lineWidth = 2 * dpr;
+        waveCtx.strokeStyle = "#00d6a2";
+        waveCtx.beginPath();
+        const slice = wW / timeData.length;
+        let x = 0;
+        for (let i = 0; i < timeData.length; i++) {
+          const v = timeData[i] / 128.0;
+          const y = (v * 0.5) * wH;
+          if (i === 0) {
+            waveCtx.moveTo(x, y);
+          } else {
+            waveCtx.lineTo(x, y);
+          }
+          x += slice;
+        }
+        waveCtx.stroke();
+
+        // --- bar spectrum ---
+        const bW = barsCanvas.width;
+        const bH = barsCanvas.height;
+        barsCtx.clearRect(0, 0, bW, bH);
+
+        const barCount = 80;
+        const step = Math.max(1, Math.floor(freqData.length / barCount));
+        const barWidth = bW / barCount;
+
+        for (let i = 0; i < barCount; i++) {
+          const value = freqData[i * step] || 0;
+          const percent = value / 255;
+          const h = percent * (bH * 0.9);
+          const xBar = i * barWidth;
+          const yBar = bH - h;
+          const hue = 160 + (i / barCount) * 40;
+          barsCtx.fillStyle = `hsl(${hue},80%,${30 + percent * 40}%)`;
+          barsCtx.fillRect(xBar, yBar, barWidth * 0.8, h);
+        }
+
+        // --- 20–20k log widget ---
+        const lW = logCanvas.width;
+        const lH = logCanvas.height;
+        logCtx.clearRect(0, 0, lW, lH);
+
+        const baseY = lH * 0.55;
+        logCtx.strokeStyle = "rgba(255,255,255,0.9)";
+        logCtx.lineWidth = 1 * dpr;
+        logCtx.beginPath();
+        logCtx.moveTo(0, baseY);
+        logCtx.lineTo(lW, baseY);
+        logCtx.stroke();
+
+        const tickFreqs = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+        logCtx.font = `${9 * dpr}px system-ui`;
+        logCtx.textAlign = "center";
+        logCtx.fillStyle = "rgba(255,255,255,0.65)";
+        tickFreqs.forEach(f => {
+          const xTick = freqToLogX(f, lW);
+          logCtx.strokeStyle = "rgba(255,255,255,0.1)";
+          logCtx.beginPath();
+          logCtx.moveTo(xTick, 0);
+          logCtx.lineTo(xTick, lH);
+          logCtx.stroke();
+          const label = f >= 1000 ? (f / 1000) + "k" : f.toString();
+          logCtx.fillText(label, xTick, lH - 3 * dpr);
+        });
+
+        const nyquist = audioCtx.sampleRate / 2;
+        logCtx.beginPath();
+        logCtx.lineWidth = 2 * dpr;
+        logCtx.strokeStyle = "rgba(240,240,240,0.85)";
+        for (let px = 0; px < lW; px++) {
+          const ratio = px / Math.max(1, (lW - 1));
+          const freq = 20 * Math.pow(10, ratio * 3); // approx 20–20k
+          const bin = Math.min(
+            freqData.length - 1,
+            Math.max(0, Math.round(freq / nyquist * freqData.length))
+          );
+          const mag = freqData[bin] || 0;
+          const norm = mag / 255;
+          const amp = 0.15 + norm * 0.75;
+          const y = lH - amp * lH;
+          if (px === 0) {
+            logCtx.moveTo(px, y);
+          } else {
+            logCtx.lineTo(px, y);
+          }
+        }
+        logCtx.stroke();
+
+        // --- dwarves ---
+        const dW = dwarfCanvas.width;
+        const dH = dwarfCanvas.height;
+        dwarfCtx.clearRect(0, 0, dW, dH);
+
+        const dwarfValues = new Array(dwarves.length).fill(0);
+        const dwarfCounts = new Array(dwarves.length).fill(0);
+
+        for (let i = 0; i < freqData.length; i++) {
+          const f = (i * nyquist) / freqData.length;
+          const mag = freqData[i];
+          const idx = dwarves.findIndex(d => f >= d.min && f < d.max);
+          if (idx >= 0) {
+            dwarfValues[idx] += mag;
+            dwarfCounts[idx]++;
+          }
+        }
+
+        const dwarfBarWidth = dW / dwarves.length;
+        dwarves.forEach((d, i) => {
+          const avg = dwarfCounts[i] ? dwarfValues[i] / dwarfCounts[i] : 0;
+          const norm = avg / 255;
+          const h = norm * (dH * 0.8);
+          const xBar = i * dwarfBarWidth + dwarfBarWidth * 0.1;
+          const yBar = dH - h - 6 * dpr;
+          const width = dwarfBarWidth * 0.8;
+          const hue = 280 + i * 10;
+          dwarfCtx.fillStyle = `hsl(${hue},70%,${35 + norm * 35}%)`;
+          dwarfCtx.fillRect(xBar, yBar, width, h);
+          dwarfCtx.fillStyle = "rgba(255,255,255,0.85)";
+          dwarfCtx.font = `${11 * dpr}px system-ui`;
+          dwarfCtx.textAlign = "center";
+          dwarfCtx.fillText(d.name, xBar + width / 2, dH - 4 * dpr);
+        });
+      }
+
+      startBtn.addEventListener("click", () => {
+        initAudio();
+      });
+    });
+  </script>
+</body>
+</html>
